@@ -1,0 +1,15 @@
+{
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        {
+          "key": "Content-Security-Policy",
+          "value": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' wss://ws-feed.exchange.coinbase.com wss://ws.kraken.com https://api.exchange.coinbase.com https://api.coinbase.com https://api.kraken.com https://futures.kraken.com https://gamma-api.polymarket.com https://api.elections.kalshi.com https://www.deribit.com https://stablecoins.llama.fi https://api.alternative.me https://query1.finance.yahoo.com https://farside.co.uk https://api.allorigins.win https://api.codetabs.com https://corsproxy.io https://cors.eu.org; base-uri 'self'; frame-ancestors 'none'"
+        },
+        { "key": "X-Content-Type-Options", "value": "nosniff" },
+        { "key": "Referrer-Policy", "value": "no-referrer" }
+      ]
+    }
+  ]
+}
