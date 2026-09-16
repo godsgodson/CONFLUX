@@ -11,5 +11,10 @@
         { "key": "Referrer-Policy", "value": "no-referrer" }
       ]
     }
-  ]
+  ],
+  "functions": {
+    "api/proxy.js": {
+      "maxDuration": 30
+    }
+  }
 }
