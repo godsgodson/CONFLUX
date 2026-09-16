@@ -1721,7 +1721,9 @@ async function updKalshi(){
   if(!done)host.innerHTML='<div class="pmrow dim"><span class="pl">UNAVAILABLE</span></div>';
 }
 
-/* ---------- 4 · ETF FLOWS (Farside, parsed via proxy) ---------- */
+/* ---------- 4 · ETF FLOWS (Farside via relay; legs independent + quick retry) ---------- */
+const FS_BTC='https://farside.co.uk/btc/',FS_ETH='https://farside.co.uk/eth/';
+let etfRetry=0;
 function looseDate(s){
   if(!s)return null;
   let m=String(s).match(/(\d{1,2})\s+([A-Za-z]{3,})\s+(\d{4})/);
@@ -1748,13 +1750,10 @@ function farsideRows(txt){
 }
 function renderETF(tag,r){
   const bars=el('#etf-'+tag),tot=el('#etf-'+tag+'-tot');
-  if(!bars)return;
-  if(!r.ok||!r.d){bars.innerHTML='<span class="dim2txt">UNAVAILABLE</span>';
-    if(tot)tot.textContent='—';
-    if(tag==='btc')setCard('etf','down','FARSIDE BLOCKED');
-    return;}
+  if(!bars)return false;
+  if(!r.ok||!r.d){bars.innerHTML='<span class="dim2txt">RETRYING&hellip;</span>';if(tot)tot.textContent='—';return false;}
   const rows=farsideRows(r.d).slice(-7);
-  if(!rows.length){bars.innerHTML='<span class="dim2txt">NO ROWS PARSED</span>';return;}
+  if(!rows.length){bars.innerHTML='<span class="dim2txt">NO ROWS PARSED</span>';if(tot)tot.textContent='—';return false;}
   const mx=Math.max.apply(null,rows.map(x=>Math.abs(x.v)).concat([1]));
   let html='';
   rows.forEach(x=>{
@@ -1766,13 +1765,18 @@ function renderETF(tag,r){
   const sum=rows.reduce((s,x)=>s+x.v,0);
   if(tot){tot.textContent='7D '+(sum>=0?'+':'-')+'$'+Math.abs(sum).toFixed(0)+'M';
     tot.className='etftot '+(sum>=0?'up':'dn');}
-  if(tag==='btc')setCard('etf',r.via==='stale'?'cache':'delayed','FARSIDE · PARSED · '+utcTime(Date.now()));
+  return true;
 }
 async function updETF(){
-  setCard('etf','delayed','FETCHING VIA PROXY…');
-  const rB=await ctxGet('https://farside.co.uk/btc/',1500000,'farside-btc',18000,false);
-  const rE=await ctxGet('https://farside.co.uk/eth/',1500000,'farside-eth',18000,false);
-  renderETF('btc',rB);renderETF('eth',rE);
+  setCard('etf','delayed','FETCHING VIA RELAY…');
+  const rB=await ctxGet(FS_BTC,1500000,'farside-btc',28000,false);
+  const rE=await ctxGet(FS_ETH,1500000,'farside-eth',28000,false);
+  const b=renderETF('btc',rB),e=renderETF('eth',rE);
+  if(b&&e)setCard('etf',(rB.via==='cache'&&rE.via==='cache')?'cache':'delayed','FARSIDE · '+utcTime(Date.now()));
+  else if(b||e)setCard('etf','delayed','FARSIDE PARTIAL · '+(b?'ETH PENDING':'BTC PENDING'));
+  else setCard('etf','down','FARSIDE BLOCKED');
+  if(!(b&&e)&&etfRetry<6){etfRetry++;setTimeout(safe(updETF),75000);}   /* quick retry; ctxGet backoff still paces the real hits */
+  else if(b&&e)etfRetry=0;
 }
 
 /* ---------- 5 · MACRO PANEL (Yahoo delayed, proxy fallback) ---------- */
