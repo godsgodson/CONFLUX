@@ -1612,27 +1612,44 @@ async function updDeriv(){
 
 /* ---------- 2+3 · PREDICTION MARKETS (Polymarket + Kalshi) ---------- */
 let polyData=null,polyVia='down',kalFed=null;
-const polySlim=d=>Array.isArray(d)?d.map(m=>({q:m.question,o:m.outcomes,p:m.outcomePrices,v:m.volume24hr||m.volume24Hr,e:m.endDate})):d;
+/* outcomes/prices arrive as JSON strings OR arrays depending on API version — handle both */
+const PA=x=>{if(Array.isArray(x))return x;if(typeof x==='string'){try{return JSON.parse(x);}catch(e){return[];}}return[];};
+function mkt(m){
+  if(!m||typeof m!=='object')return null;
+  const q=String(m.question||m.title||'').replace(/\s+/g,' ').trim();
+  if(!q)return null;
+  const outs=PA(m.outcomes);
+  let prs=PA(m.outcomePrices).map(Number);
+  if(!prs.length||prs.length!==outs.length||prs.some(v=>!isFinite(v)||v<0||v>1)){
+    /* price fallbacks: last trade, then bid/ask mid */
+    const lt=Number(m.lastTradePrice),b=Number(m.bestBid),a=Number(m.bestAsk);
+    if(isFinite(lt)&&lt>0&&lt<1)prs=[lt,1-lt];
+    else if(b>0&&a>0&&a<=1)prs=[(b+a)/2,1-(b+a)/2];
+  }
+  if(outs.length&&prs.length)return{q,outs,prs,
+    vol:+m.volume24hr||+m.volume24Hr||+m.volumeNum||0,
+    end:m.endDate?String(m.endDate):''};
+  return null;
+}
 async function updPoly(){
-  const r=await ctxGet('https://gamma-api.polymarket.com/markets?closed=false&limit=200',45000,'poly',12000,true,polySlim);
-  if(!r.ok){setCard('poly','down','POLYMARKET UNREACHABLE');return;}
-  const out=[];
-  (Array.isArray(r.d)?r.d:[]).forEach(m=>{
-    if(!m||m.q==null)return;
-    let outs=[],prs=[];
-    try{outs=JSON.parse(m.o||'[]');}catch(e){}
-    try{prs=JSON.parse(m.p||'[]');}catch(e){}
-    if(outs.length&&prs.length)
-      out.push({q:String(m.q).replace(/\s+/g,' ').trim(),outs,prs:prs.map(Number),vol:+m.v||0,end:m.e||''});
-  });
-  polyData=out;polyVia=r.via;
+  const slim=d=>Array.isArray(d)?d.map(m=>({question:m.question,title:m.title,outcomes:m.outcomes,
+    outcomePrices:m.outcomePrices,lastTradePrice:m.lastTradePrice,bestBid:m.bestBid,bestAsk:m.bestAsk,
+    volume24hr:m.volume24hr,volume24Hr:m.volume24Hr,volumeNum:m.volumeNum,endDate:m.endDate})):d;
+  let r=await ctxGet('https://gamma-api.polymarket.com/markets?closed=false&limit=200&order=volume24hr&ascending=false',
+    45000,'poly',12000,true,slim);
+  if(!r.ok||!Array.isArray(r.d)||!r.d.length)
+    r=await ctxGet('https://gamma-api.polymarket.com/markets?closed=false&limit=500',
+      45000,'poly2',12000,true,slim);
+  if(!r.ok||!Array.isArray(r.d)){setCard('poly','down','POLYMARKET UNREACHABLE');return;}
+  polyData=r.d.map(mkt).filter(Boolean);
+  polyVia=r.via;
   renderPoly();
 }
 function probOf(p){
   let i=p.outs.findIndex(o=>/yes|up|above|reach|hit|cut/i.test(o));
   if(i<0)i=0;
   const v=p.prs[i];
-  return{v:isFinite(v)?v:null,i,out:p.outs[i]||''};
+  return{v:isFinite(v)?Math.max(0,Math.min(1,v)):null,i,out:p.outs[i]||''};
 }
 function pmRow(lbl,v){
   const p=v==null?null:Math.round(v*100);
@@ -1640,20 +1657,20 @@ function pmRow(lbl,v){
     `<div class="pxbar"><i style="width:${p||0}%"></i></div></div>`;
 }
 function renderPoly(){
-  if(!polyData)return;
+  if(polyData===null)return;
   const host=el('#poly-crypto');if(!host)return;
   let html='';
   for(const[a,names]of[['BTC',['bitcoin','btc']],['ETH',['ethereum','eth']],['SOL',['solana','sol']]]){
     const re=new RegExp('(?:'+names.join('|')+')','i');
     const m=polyData.filter(p=>re.test(p.q)&&/up or down/i.test(p.q)).sort((x,y)=>y.vol-x.vol)[0];
-    if(m){
-      const dt=m.end?new Date(m.end):null;
-      const span=dt?(dt-Date.now())/3600e3:null;
-      const tag=(span!=null&&span>36&&dt)?('BY '+MON[dt.getUTCMonth()]+' '+dt.getUTCDate()):'TODAY';
-      html+=pmRow(a+' UP · '+tag,probOf(m).v);
-    }else html+=pmRow(a+' UP · TODAY',null);
+    let tag='TODAY';
+    if(m&&m.end){
+      const dt=new Date(m.end);
+      if(!isNaN(dt)&&(dt-Date.now())/3600e3>36)tag='BY '+MON[dt.getUTCMonth()]+' '+dt.getUTCDate();
+    }
+    html+=pmRow(a+' UP · '+tag,m?probOf(m).v:null);
   }
-  const lev=polyData.filter(p=>/bitcoin|btc/i.test(p.q)&&!/up or down/i.test(p.q)&&/\$[\d,.]+/i.test(p.q)&&p.end&&new Date(p.end)>new Date())
+  const lev=polyData.filter(p=>/bitcoin|btc/i.test(p.q)&&!/up or down/i.test(p.q)&&/\$[\d,.]+[KMB]?/i.test(p.q)&&p.end&&new Date(p.end)>new Date())
     .sort((x,y)=>y.vol-x.vol).slice(0,3);
   for(const L of lev){
     const mm=L.q.match(/\$[\d,.]+[KMB]?/i);
@@ -1664,7 +1681,7 @@ function renderPoly(){
   }
   host.innerHTML=html;
   renderPolyFed();
-  setCard('poly',stVia(polyVia),'γ-API · '+utcTime(Date.now()));
+  setCard('poly',polyData.length?stVia(polyVia):'down','γ-API · '+utcTime(Date.now()));
 }
 function renderPolyFed(){
   const host=el('#poly-fed');if(!host)return;
@@ -1884,8 +1901,8 @@ async function updFG(){
 async function updDeribit(){
   const dvB=await ctxGet('https://www.deribit.com/api/v2/public/ticker?instrument_name=BTC-DVOL',200000,'dvb',9000);
   const dvE=await ctxGet('https://www.deribit.com/api/v2/public/ticker?instrument_name=ETH-DVOL',200000,'dve',9000);
-  dvolBTC=(dvB.ok&&dvB.d&&dvB.d.result&&+dvB.d.result.last)||null;
-  dvolETH=(dvE.ok&&dvE.d&&dvE.d.result&&+dvE.d.result.last)||null;
+  const pxOf=r=>(r&&r.ok&&r.d&&r.d.result)?(+r.d.result.last_price||+r.d.result.last||+r.d.result.mark_price||null):null;
+  dvolBTC=pxOf(dvB);dvolETH=pxOf(dvE);
   const ins=await ctxGet('https://www.deribit.com/api/v2/public/get_instruments?currency=BTC&kind=option&expired=false',200000,'dbtins',12000);
   skew=null;
   if(ins.ok&&ins.d&&Array.isArray(ins.d.result)){
