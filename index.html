@@ -1478,6 +1478,10 @@ document.addEventListener('mousedown',()=>tip.classList.remove('on'));
    Fetch strategy : direct first, then public CORS proxies, then
    localStorage cache. Every card degrades independently.
    ================================================================= */
+/* ============ CONTEXT FETCH LAYER v3 ============
+   Order: direct (when possible) → own /api/proxy relay → public proxies (last resort).
+   Plus: per-host direct-fail memory, redirect:'error' (a failing proxy that 302s to the
+   target must never drag the browser into a CORS wall), exponential backoff, cache. */
 const BLOCKED=new Set(['futures.kraken.com','query1.finance.yahoo.com','api.elections.kalshi.com','farside.co.uk']);
 const PROXIES=[
   u=>'https://api.allorigins.win/raw?url='+encodeURIComponent(u),
@@ -1485,18 +1489,31 @@ const PROXIES=[
   u=>'https://corsproxy.io/?url='+encodeURIComponent(u),
   u=>'https://cors.eu.org/'+u,
 ];
-const backoff={};
+let ownProxy=null;                       /* null=unknown, true=/api/proxy live, false=absent */
+async function detectOwnProxy(){
+  try{const t=await ctxRaw('/api/proxy?url='+encodeURIComponent('https://api.kraken.com/0/public/Time'),6000);
+      const j=JSON.parse(t);ownProxy=!!(j&&j.result);}
+  catch(e){ownProxy=false;}
+}
+const backoff={},directFails={};
 const hostOf=u=>{try{return new URL(u).host;}catch(e){return'';}};
 async function ctxRaw(url,tmo){
   const c=new AbortController();const id=setTimeout(()=>c.abort(),tmo||10000);
-  try{const r=await fetch(url,{signal:c.signal});if(!r.ok)throw new Error('http');return await r.text();}
+  try{const r=await fetch(url,{signal:c.signal,redirect:'error'});if(!r.ok)throw new Error('http '+r.status);return await r.text();}
   finally{clearTimeout(id);}
 }
+const OWN=u=>'/api/proxy?url='+encodeURIComponent(u);
 async function ctxFetch(url,tmo){
-  if(!BLOCKED.has(hostOf(url))){          /* don't waste a request on hosts that never send CORS */
-    try{return{txt:await ctxRaw(url,tmo),via:'direct'};}catch(e){}
+  const host=hostOf(url),blocked=BLOCKED.has(host);
+  if(!blocked&&!(directFails[host]>Date.now())){
+    try{return{txt:await ctxRaw(url,tmo),via:'direct'};}
+    catch(e){directFails[host]=Date.now()+600000;}   /* direct failed here → skip it for 10 min */
   }
-  for(const p of PROXIES){
+  if(ownProxy){
+    try{return{txt:await ctxRaw(OWN(url),tmo),via:'proxy'};}
+    catch(e){if(/^http/.test(String(e.message||'')))return null;}  /* upstream said no — public proxies won't save it */
+  }
+  for(const p of PROXIES){                            /* last resort (GitHub Pages / function down) */
     try{return{txt:await ctxRaw(p(url),(tmo||10000)+5000),via:'proxy'};}catch(e){}
   }
   return null;
@@ -1507,7 +1524,7 @@ async function ctxGet(url,ttl,key,tmo,json,slim){
   const ck='conflux:'+(key||url.slice(0,120));
   const c=LSC.get(ck);
   const b=backoff[ck];
-  if(b&&Date.now()<b.until)                 /* cooling down after failures — serve what we have */
+  if(b&&Date.now()<b.until)
     return c?{ok:true,d:c.d,via:'cache'}:{ok:false};
   if(c&&c.ts&&ttl&&Date.now()-c.ts<ttl)return{ok:true,d:c.d,via:'cache'};
   const r=await ctxFetch(url,tmo);
@@ -1519,7 +1536,7 @@ async function ctxGet(url,ttl,key,tmo,json,slim){
     return{ok:true,d,via:r.via};
   }
   const f=backoff[ck]||(backoff[ck]={n:0,until:0});
-  f.n++;f.until=Date.now()+Math.min(60000*Math.pow(2,f.n-1),900000);   /* 1→2→4→…→15 min */
+  f.n++;f.until=Date.now()+Math.min(60000*Math.pow(2,f.n-1),900000);
   return c?{ok:true,d:c.d,via:'stale'}:{ok:false};
 }
 const stVia=v=>v==='direct'?'live':v==='proxy'?'delayed':v==='cache'?'live':'cache';
@@ -2018,7 +2035,8 @@ function drawStSpark(pts){
 }
 
 /* ---------- CONTEXT SCHEDULER — cadence matched to how fast each source actually moves ---------- */
-function bootContext(){
+async function bootContext(){
+  await detectOwnProxy();
   const jobs=[updEvents,updDeriv,updPoly,updKalshi,updMacro,updFG,updDeribit,updETF,updStables,pollDepth];
   jobs.forEach((f,i)=>setTimeout(safe(f),400+i*650));
   setInterval(safe(updEvents),60000);
