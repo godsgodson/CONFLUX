@@ -1763,7 +1763,8 @@ function renderETF(tag,r){
   });
   bars.innerHTML=html;
   const sum=rows.reduce((s,x)=>s+x.v,0);
-  if(tot){tot.textContent='7D '+(sum>=0?'+':'-')+'$'+Math.abs(sum).toFixed(0)+'M';
+  const lastD=new Date(rows[rows.length-1].d);
+  if(tot){tot.textContent='7D '+(sum>=0?'+':'-')+'$'+Math.abs(sum).toFixed(0)+'M · AS OF '+MON[lastD.getUTCMonth()]+' '+lastD.getUTCDate();
     tot.className='etftot '+(sum>=0?'up':'dn');}
   return true;
 }
