@@ -464,7 +464,7 @@
           <div class="drow head"><b></b><span>FUND ANN</span><span>OPEN INT</span><span>BASIS</span></div>
           <div id="deriv-rows"></div>
         </div>
-        <div class="card-note">KRAKEN FUTURES · FUNDING CHARGED HOURLY — LONGS PAY SHORTS WHEN + · BASIS = PERP MARK VS LIVE SPOT MID · AMBER FUNDING = CROWDED, SQUEEZE RISK</div>
+        <div class="card-note">DERIBIT 8H FUNDING ×3×365 ANN · KRAKEN FUT FALLBACK · BASIS = PERP MARK VS LIVE SPOT MID · AMBER FUNDING = CROWDED, SQUEEZE RISK</div>
       </div>
 
       <div class="card" id="card-poly">
@@ -1478,19 +1478,26 @@ document.addEventListener('mousedown',()=>tip.classList.remove('on'));
    Fetch strategy : direct first, then public CORS proxies, then
    localStorage cache. Every card degrades independently.
    ================================================================= */
+const BLOCKED=new Set(['futures.kraken.com','query1.finance.yahoo.com','api.elections.kalshi.com','farside.co.uk']);
 const PROXIES=[
   u=>'https://api.allorigins.win/raw?url='+encodeURIComponent(u),
+  u=>'https://api.codetabs.com/v1/proxy?quest='+encodeURIComponent(u),
   u=>'https://corsproxy.io/?url='+encodeURIComponent(u),
+  u=>'https://cors.eu.org/'+u,
 ];
+const backoff={};
+const hostOf=u=>{try{return new URL(u).host;}catch(e){return'';}};
 async function ctxRaw(url,tmo){
   const c=new AbortController();const id=setTimeout(()=>c.abort(),tmo||10000);
   try{const r=await fetch(url,{signal:c.signal});if(!r.ok)throw new Error('http');return await r.text();}
   finally{clearTimeout(id);}
 }
 async function ctxFetch(url,tmo){
-  try{return{txt:await ctxRaw(url,tmo),via:'direct'};}catch(e){}
+  if(!BLOCKED.has(hostOf(url))){          /* don't waste a request on hosts that never send CORS */
+    try{return{txt:await ctxRaw(url,tmo),via:'direct'};}catch(e){}
+  }
   for(const p of PROXIES){
-    try{return{txt:await ctxRaw(p(url),(tmo||10000)+4000),via:'proxy'};}catch(e){}
+    try{return{txt:await ctxRaw(p(url),(tmo||10000)+5000),via:'proxy'};}catch(e){}
   }
   return null;
 }
@@ -1499,14 +1506,20 @@ const LSC={get(k){try{const v=localStorage.getItem(k);return v?JSON.parse(v):nul
 async function ctxGet(url,ttl,key,tmo,json,slim){
   const ck='conflux:'+(key||url.slice(0,120));
   const c=LSC.get(ck);
+  const b=backoff[ck];
+  if(b&&Date.now()<b.until)                 /* cooling down after failures — serve what we have */
+    return c?{ok:true,d:c.d,via:'cache'}:{ok:false};
   if(c&&c.ts&&ttl&&Date.now()-c.ts<ttl)return{ok:true,d:c.d,via:'cache'};
   const r=await ctxFetch(url,tmo);
   if(r){
     let d=r.txt;
     if(json!==false){try{d=JSON.parse(r.txt);}catch(e){return c?{ok:true,d:c.d,via:'stale'}:{ok:false};}}
     LSC.set(ck,{ts:Date.now(),d:slim?slim(d):d});
+    delete backoff[ck];
     return{ok:true,d,via:r.via};
   }
+  const f=backoff[ck]||(backoff[ck]={n:0,until:0});
+  f.n++;f.until=Date.now()+Math.min(60000*Math.pow(2,f.n-1),900000);   /* 1→2→4→…→15 min */
   return c?{ok:true,d:c.d,via:'stale'}:{ok:false};
 }
 const stVia=v=>v==='direct'?'live':v==='proxy'?'delayed':v==='cache'?'live':'cache';
@@ -1519,40 +1532,65 @@ function setCard(tag,st,meta){
 const safe=f=>()=>{try{f();}catch(e){}};
 const fmtUSD=v=>!(v>0)?'—':v>=1e9?'$'+(v/1e9).toFixed(2)+'B':v>=1e6?'$'+(v/1e6).toFixed(1)+'M':'$'+(v/1e3).toFixed(0)+'K';
 
-/* ---------- 1 · PERP DERIVATIVES (Kraken Futures) ---------- */
+/* ---------- 1 · PERP DERIVATIVES — Deribit direct (CORS-open), Kraken Futures as proxy fallback ---------- */
+const DBTQ='https://www.deribit.com/api/v2/public/ticker?instrument_name=';
+const DBT_PERP={BTC:'BTC-PERPETUAL',ETH:'ETH-PERPETUAL',SOL:'SOL-PERPETUAL'};
 const KRFU='https://futures.kraken.com/derivatives/api/v3';
 const PERPS={BTC:'PF_XBTUSD',ETH:'PF_ETHUSD',SOL:'PF_SOLUSD'};
 const OI_ABSURD={BTC:6e11,ETH:2e11,SOL:6e10};
+function spotMid(a){const cb=venue.cb[a],kr=venue.kr[a];let s=0,n=0;
+  if(cb&&cb.price>0){s+=cb.price;n++;}if(kr&&kr.price>0){s+=kr.price;n++;}return n?s/n:0;}
 async function updDeriv(){
-  const T=await ctxGet(KRFU+'/tickers',20000,'krf-tk',10000);
-  const O=await ctxGet(KRFU+'/openinterest',20000,'krf-oi',10000);
-  if(!T.ok){setCard('deriv','down','KRAKEN FUTURES UNREACHABLE');return;}
-  let tks=(T.d&&T.d.tickers)||[];if(!Array.isArray(tks))tks=[];
-  const M={};tks.forEach(t=>{M[t.symbol]=t;});
-  let oim={};
-  if(O.ok&&O.d&&Array.isArray(O.d.openInterest))O.d.openInterest.forEach(o=>{if(o.symbol)oim[o.symbol]=+o.openInterest||0;});
+  const rows={};
+  /* pass 1 — Deribit perps: browser-accessible, no proxy involved */
+  await Promise.allSettled(Object.keys(DBT_PERP).map(async a=>{
+    const r=await ctxGet(DBTQ+DBT_PERP[a],80000,'dbt-'+DBT_PERP[a],9000);
+    if(r.ok&&r.d&&r.d.result&&+r.d.result.mark_price>0){
+      const t=r.d.result,mark=+t.mark_price,spot=spotMid(a)||+t.index_price||0,fr8=+t.funding_8h;
+      rows[a]={frAnn:isFinite(fr8)?fr8*3*365*100:null,
+               oi:+t.open_interest>0?+t.open_interest:null,
+               basis:(spot>0&&mark>0)?(mark/spot-1)*1e4:null,
+               src:'DBT'};
+    }
+  }));
+  /* pass 2 — Kraken Futures (proxy-only) fills any gap */
+  if(!rows.BTC||!rows.ETH||!rows.SOL){
+    const T=await ctxGet(KRFU+'/tickers',300000,'krf-tk',12000);
+    const O=await ctxGet(KRFU+'/openinterest',300000,'krf-oi',12000);
+    if(T.ok){
+      let tks=(T.d&&T.d.tickers)||[];if(!Array.isArray(tks))tks=[];
+      const M={};tks.forEach(t=>{M[t.symbol]=t;});
+      const oim={};
+      if(O.ok&&O.d&&Array.isArray(O.d.openInterest))O.d.openInterest.forEach(o=>{if(o.symbol)oim[o.symbol]=+o.openInterest||0;});
+      for(const a of['BTC','ETH','SOL']){
+        if(rows[a])continue;
+        const t=M[PERPS[a]];if(!t)continue;
+        const spot=spotMid(a),mark=+t.markPrice||0,fr=+t.fundingRate;
+        let oi=+t.openInterest||oim[PERPS[a]]||0;
+        if(oi>0&&spot>0&&oi*spot<=OI_ABSURD[a])oi=oi*spot;
+        rows[a]={frAnn:isFinite(fr)?fr*24*365*100:null,
+                 oi:oi>0?oi:null,
+                 basis:(spot>0&&mark>0)?(mark/spot-1)*1e4:null,
+                 src:'KRF'};
+      }
+    }
+  }
   const host=el('#deriv-rows');if(!host)return;
-  let html='';
+  let html='',srcs=[];
   for(const a of['BTC','ETH','SOL']){
-    const t=M[PERPS[a]];
-    if(!t){html+=`<div class="drow"><b>${a}</b><span class="dim2">NO PERP LISTED</span><span></span><span></span></div>`;continue;}
-    const cb=venue.cb[a],kr=venue.kr[a];let spot=0;
-    if(cb&&cb.price)spot=cb.price;if(kr&&kr.price)spot=spot?(spot+kr.price)/2:kr.price;
-    const mark=+t.markPrice||0,fr=+t.fundingRate;
-    const frAnn=isFinite(fr)?fr*24*365*100:null;
-    let oi=+t.openInterest||oim[PERPS[a]]||0,oiTxt='—';
-    if(oi>0&&spot>0)oiTxt=oi*spot>OI_ABSURD[a]?fmtUSD(oi):fmtUSD(oi*spot);
-    else if(oi>0)oiTxt=fmtUSD(oi);
-    const basis=(spot>0&&mark>0)?(mark/spot-1)*1e4:null;
-    const fcls=frAnn==null?'':frAnn>15?'hot':frAnn<-10?'cool':'';
-    const bcls=basis==null?'':basis>3?'bull':basis<-3?'bear':'';
+    const R=rows[a];
+    if(!R){html+=`<div class="drow"><b>${a}</b><span class="dim2">NO FEED</span><span></span><span></span></div>`;continue;}
+    srcs.push(R.src);
+    const fcls=R.frAnn==null?'':R.frAnn>15?'hot':R.frAnn<-10?'cool':'';
+    const bcls=R.basis==null?'':R.basis>3?'bull':R.basis<-3?'bear':'';
     html+=`<div class="drow"><b>${a}</b>`+
-      `<span class="${fcls}">${frAnn==null?'—':(frAnn>=0?'+':'')+frAnn.toFixed(1)+'%'}</span>`+
-      `<span>${oiTxt}</span>`+
-      `<span class="${bcls}">${basis==null?'—':(basis>=0?'+':'')+basis.toFixed(1)+'BP'}</span></div>`;
+      `<span class="${fcls}">${R.frAnn==null?'—':(R.frAnn>=0?'+':'')+R.frAnn.toFixed(1)+'%'}</span>`+
+      `<span>${R.oi?fmtUSD(R.oi):'—'}</span>`+
+      `<span class="${bcls}">${R.basis==null?'—':(R.basis>=0?'+':'')+R.basis.toFixed(1)+'BP'}</span></div>`;
   }
   host.innerHTML=html;
-  setCard('deriv',stVia(T.via),'KRAKEN FUT · '+utcTime(Date.now()));
+  setCard('deriv',srcs.length===0?'down':srcs.every(s=>s==='DBT')?'live':'delayed',
+    (srcs.length?[...new Set(srcs)].join('+'):'NO SOURCE')+' · '+utcTime(Date.now()));
 }
 
 /* ---------- 2+3 · PREDICTION MARKETS (Polymarket + Kalshi) ---------- */
@@ -1979,21 +2017,21 @@ function drawStSpark(pts){
   ctx.stroke();
 }
 
-/* ---------- CONTEXT SCHEDULER ---------- */
+/* ---------- CONTEXT SCHEDULER — cadence matched to how fast each source actually moves ---------- */
 function bootContext(){
   const jobs=[updEvents,updDeriv,updPoly,updKalshi,updMacro,updFG,updDeribit,updETF,updStables,pollDepth];
   jobs.forEach((f,i)=>setTimeout(safe(f),400+i*650));
   setInterval(safe(updEvents),60000);
-  setInterval(safe(updDeriv),30000);
-  setInterval(safe(updPoly),90000);
-  setInterval(safe(updKalshi),300000);
-  setInterval(safe(updMacro),60000);
+  setInterval(safe(updDeriv),90000);       /* funding / OI / basis — Deribit direct */
+  setInterval(safe(updPoly),120000);       /* Polymarket — direct, CORS-open */
+  setInterval(safe(updKalshi),600000);     /* Kalshi — proxy only, slow */
+  setInterval(safe(updMacro),300000);      /* Yahoo daily bars — proxy only, daily data */
   setInterval(safe(updFG),900000);
   setInterval(safe(updDeribit),300000);
   setInterval(safe(updETF),1800000);
   setInterval(safe(updStables),1800000);
   setInterval(safe(pollDepth),8000);
-  setTimeout(safe(updDeribit),60000); /* second pass once live spot is available for the skew */
+  setTimeout(safe(updDeribit),60000);      /* second skew pass once live spot exists */
 }
 
 /* ================= LOOPS ================= */
